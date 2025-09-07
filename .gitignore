@@ -1,0 +1,12 @@
+.direnv/
+build/
+.cache/
+.vscode/
+
+*.log
+*.tmp
+*.bak
+*.pdf
+.envrc
+
+flake.lock
