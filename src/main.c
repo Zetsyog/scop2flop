@@ -69,8 +69,8 @@ static __isl_give isl_set *osl_relation_to_isl_set(osl_relation_p relation,
   return isl_set_from_basic_set(bset);
 }
 
-int compute_flops_in_expr(const char *expr) {
-  int flops = 0;
+unsigned long long compute_flops_in_expr(const char *expr) {
+  unsigned long long flops = 0;
   /*
     expr should look like
     "a[i][j][...] = a[i][j][...] + b[i+1][j] * (c[i][j] - d[i][j]) / e[i][j];"
@@ -132,10 +132,10 @@ compute_ehrhart_polynomial(isl_ctx *ctx, osl_scop_p scop,
   return isl_set_card(set);
 }
 
-int evaluate_ehrhart_polynomial(isl_pw_qpolynomial *poly,
-                                param_values_t *params) {
+__isl_give isl_val *evaluate_ehrhart_polynomial(isl_pw_qpolynomial *poly,
+                                                param_values_t *params) {
   if (poly == NULL) {
-    return -1; // Error
+    return NULL; // Error
   }
 
   isl_space *space = isl_pw_qpolynomial_get_space(poly);
@@ -153,12 +153,10 @@ int evaluate_ehrhart_polynomial(isl_pw_qpolynomial *poly,
   }
 
   isl_val *eval = isl_pw_qpolynomial_eval(isl_pw_qpolynomial_copy(poly), point);
-  int result = isl_val_get_num_si(eval);
 
-  isl_val_free(eval);
   isl_space_free(space);
 
-  return result;
+  return eval;
 }
 
 /**
@@ -167,17 +165,17 @@ int evaluate_ehrhart_polynomial(isl_pw_qpolynomial *poly,
  * @param scop The OpenScop representation of the program.
  * @return The number of floating-point operations.
  */
-int compute_flops(param_values_t *params, osl_scop_p scop) {
-  int flops = 0;
+void compute_flops(param_values_t *params, osl_scop_p scop) {
   unsigned nstmt = 0;
-
-  unsigned total_flops = 0;
 
   // Traverse the OpenScop representation
   isl_ctx *ctx = isl_ctx_alloc();
+  isl_val *total_flops = isl_val_zero(ctx);
 
-  isl_printer *printer = isl_printer_to_file(ctx, stderr);
-  printer = isl_printer_set_output_format(printer, ISL_FORMAT_C);
+  isl_printer *err_printer = isl_printer_to_file(ctx, stderr);
+  isl_printer *out_printer = isl_printer_to_file(ctx, stdout);
+
+  err_printer = isl_printer_set_output_format(err_printer, ISL_FORMAT_C);
 
   for (osl_statement_p stmt = scop->statement; stmt != NULL;
        stmt = stmt->next) {
@@ -185,25 +183,33 @@ int compute_flops(param_values_t *params, osl_scop_p scop) {
     if (body == NULL) {
       continue;
     }
+    long stmt_flops = 0;
+
     fprintf(stderr, "# Computing flops for statement %u\n", nstmt);
     fprintf(stderr, "%s\n", body->expression->string[0]);
-    flops = compute_flops_in_expr(body->expression->string[0]);
-    fprintf(stderr, "STMT FLOPs = %d\n", flops);
+    stmt_flops = compute_flops_in_expr(body->expression->string[0]);
+    fprintf(stderr, "STMT FLOPs = %ld\n", stmt_flops);
     isl_pw_qpolynomial *ehrhart_poly =
         compute_ehrhart_polynomial(ctx, scop, stmt);
     fprintf(stderr, "Ehrhart polynomial: \n");
-    printer = isl_printer_print_pw_qpolynomial(printer, ehrhart_poly);
-    printer = isl_printer_end_line(printer);
+    err_printer = isl_printer_print_pw_qpolynomial(err_printer, ehrhart_poly);
+    err_printer = isl_printer_end_line(err_printer);
 
     if (ehrhart_poly == NULL) {
       fprintf(stderr, "Error: Could not compute Ehrhart polynomial.\n");
       continue;
     }
     if (params != NULL) {
-      int eval_flops = evaluate_ehrhart_polynomial(ehrhart_poly, params);
-      if (eval_flops > 0) {
-        total_flops += eval_flops * flops;
-        fprintf(stderr, "EVAL FLOPs = %d\n", eval_flops * flops);
+      isl_val *eval_flops = evaluate_ehrhart_polynomial(ehrhart_poly, params);
+      if (eval_flops == NULL) {
+        fprintf(stderr, "Error: Could not evaluate Ehrhart polynomial.\n");
+        continue;
+      }
+      fprintf(stderr, "EVAL FLOPs = %ld\n", isl_val_get_num_si(eval_flops));
+      if (isl_val_gt_si(eval_flops, 0)) {
+        eval_flops = isl_val_mul_ui(eval_flops, stmt_flops);
+
+        total_flops = isl_val_add(total_flops, eval_flops);
       } else {
         fprintf(stderr, "Could not evaluate Ehrhart polynomial.\n");
       }
@@ -215,15 +221,16 @@ int compute_flops(param_values_t *params, osl_scop_p scop) {
     nstmt++;
   }
 
-  isl_printer_free(printer);
-
-  isl_ctx_free(ctx);
-
   fprintf(stderr, "\n");
   fprintf(stderr, "Total FLOPs = ");
-  fprintf(stdout, "%u\n", total_flops);
+  out_printer = isl_printer_print_val(out_printer, total_flops);
+  out_printer = isl_printer_end_line(out_printer);
 
-  return flops;
+  isl_printer_free(out_printer);
+  isl_printer_free(err_printer);
+  isl_val_free(total_flops);
+
+  isl_ctx_free(ctx);
 }
 
 int main(int argc, char **argv) {
